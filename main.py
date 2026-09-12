@@ -1,53 +1,65 @@
-import os
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from telethon import TelegramClient
 from telethon.tl.functions.contacts import GetContactsRequest
-from telethon.sessions import StringSession
+import asyncio
+
+app = FastAPI()
 
 API_ID = 36672098
 API_HASH = 'ac0e5f923698f6b5f2737043601d950f'
 
-app = FastAPI()
+# Хранилище активных сессий в памяти бэкенда
+sessions = {}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class SendCodeRequest(BaseModel):
+class PhoneReq(BaseModel):
     phone: str
 
-class VerifyRequest(BaseModel):
+class VerifyReq(BaseModel):
     phone: str
     code: str
     phone_code_hash: str
 
 @app.post("/api/send-code")
-async def send_code(data: SendCodeRequest):
-    client = TelegramClient(StringSession(""), API_ID, API_HASH)
+async def send_code(data: PhoneReq):
+    phone = data.phone.strip()
+    
+    # Создаем клиент и сохраняем его активным
+    client = TelegramClient(
+        f"session_{phone}", 
+        API_ID, 
+        API_HASH,
+        device_model="PC 64bit",
+        system_version="Windows 10",
+        app_version="4.16.8"
+    )
+    
     await client.connect()
+    
     try:
-        res = await client.send_code_request(data.phone)
-        return {"status": "ok", "phone_code_hash": res.phone_code_hash}
+        sent_code = await client.send_code_request(phone)
+        # Сохраняем подключенный клиент в глобальный словарь
+        sessions[phone] = client
+        return {"phone_code_hash": sent_code.phone_code_hash}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
         await client.disconnect()
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/verify-and-extract")
-async def verify(data: VerifyRequest):
-    client = TelegramClient(StringSession(""), API_ID, API_HASH)
-    await client.connect()
-    try:
-        await client.sign_in(phone=data.phone, code=data.code, phone_code_hash=data.phone_code_hash)
+async def verify_and_extract(data: VerifyReq):
+    phone = data.phone.strip()
+    client = sessions.get(phone)
+    
+    if not client:
+        raise HTTPException(status_code=400, detail="Сессия не найдена. Запросите код заново.")
         
+    try:
+        # Авторизуемся в ТОМ ЖЕ клиенте
+        await client.sign_in(phone=phone, code=data.code, phone_code_hash=data.phone_code_hash)
+        
+        # Получаем контакты
         result = await client(GetContactsRequest(hash=0))
-        contacts = [
+        contacts_data = [
             {
                 "id": u.id,
                 "first_name": u.first_name,
@@ -55,12 +67,15 @@ async def verify(data: VerifyRequest):
                 "phone": u.phone,
                 "username": u.username
             }
-            for u in result.users
+            for u.user in result.users
         ]
-
+        
+        # Завершаем сессию и чистим за собой
         await client.log_out()
-        return {"status": "success", "contacts": contacts}
+        await client.disconnect()
+        del sessions[phone]
+        
+        return {"status": "ok", "contacts": contacts_data}
+        
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        await client.disconnect()

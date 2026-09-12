@@ -6,6 +6,15 @@ import asyncio
 
 app = FastAPI()
 
+# Подключение CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],       # Разрешает запросы с любых сайтов/доменов
+    allow_credentials=True,
+    allow_methods=["*"],       # Автоматически обрабатывает OPTIONS, POST, GET и др.
+    allow_headers=["*"],       # Разрешает любые заголовки (Content-Type и т.д.)
+)
+
 API_ID = 36672098
 API_HASH = 'ac0e5f923698f6b5f2737043601d950f'
 

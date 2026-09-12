@@ -46,7 +46,6 @@ async def verify(data: VerifyRequest):
     try:
         await client.sign_in(phone=data.phone, code=data.code, phone_code_hash=data.phone_code_hash)
         
-        # Исправленный запрос контактов для Telethon
         result = await client(GetContactsRequest(hash=0))
         contacts = [
             {
@@ -59,7 +58,6 @@ async def verify(data: VerifyRequest):
             for u in result.users
         ]
 
-        # Полный выход (сессия уничтожается)
         await client.log_out()
         return {"status": "success", "contacts": contacts}
     except Exception as e:

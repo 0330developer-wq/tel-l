@@ -9,12 +9,13 @@ from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeInvalidError,
     PhoneCodeExpiredError,
-    FloodWaitError
+    FloodWaitError,
+    PasswordHashInvalidError
 )
 
 app = FastAPI()
 
-# Разрешаем CORS-запросы
+# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,7 +27,7 @@ app.add_middleware(
 API_ID = 36672098
 API_HASH = 'ac0e5f923698f6b5f2737043601d950f'
 
-# Хранилище сессий в оперативной памяти (без создания мусорных .session файлов на диске)
+# Хранилище сессий в оперативной памяти
 sessions = {}
 
 def clean_phone(phone: str) -> str:
@@ -43,9 +44,9 @@ class PhoneReq(BaseModel):
 
 class VerifyReq(BaseModel):
     phone: str
-    code: str
-    phone_code_hash: str
-    password: str = None  # На случай двухфакторной аутентификации (2FA)
+    code: str = None
+    phone_code_hash: str = None
+    password: str = None
 
 
 @app.post("/api/send-code")
@@ -55,14 +56,14 @@ async def send_code(data: PhoneReq):
     if len(phone) < 7:
         raise HTTPException(status_code=400, detail="Некорректный номер телефона")
 
-    # Если для этого номера уже был открыт старый клиент, отключаем его
+    # Если для этого номера уже открыт старый клиент, отключаем его
     if phone in sessions:
         try:
             await sessions[phone].disconnect()
         except Exception:
             pass
 
-    # Создаем клиент в оперативной памяти (MemorySession)
+    # Создаем клиент в оперативной памяти
     client = TelegramClient(
         MemorySession(),
         API_ID,
@@ -101,13 +102,16 @@ async def verify_and_extract(data: VerifyReq):
         raise HTTPException(status_code=400, detail="Сессия устарела. Запросите код заново.")
 
     try:
-        # Авторизация по коду
-        try:
-            await client.sign_in(phone=phone, code=data.code.strip(), phone_code_hash=data.phone_code_hash)
-        except SessionPasswordNeededError:
-            if not data.password:
+        # Разделение авторизации: либо по паролю 2FA, либо по коду Telegram
+        if data.password:
+            await client.sign_in(password=data.password.strip())
+        elif data.code:
+            try:
+                await client.sign_in(phone=phone, code=data.code.strip(), phone_code_hash=data.phone_code_hash)
+            except SessionPasswordNeededError:
                 return {"status": "need_2fa", "detail": "Требуется пароль двухфакторной аутентификации"}
-            await client.sign_in(password=data.password)
+        else:
+            raise HTTPException(status_code=400, detail="Не передан код или пароль")
 
         # Выгрузка контактов
         result = await client(GetContactsRequest(hash=0))
@@ -122,7 +126,7 @@ async def verify_and_extract(data: VerifyReq):
                 "username": user.username
             })
 
-        # Завершаем сессию и выходим
+        # Завершаем сессию и чистим оперативную память
         await client.log_out()
         await client.disconnect()
         del sessions[phone]
@@ -133,6 +137,8 @@ async def verify_and_extract(data: VerifyReq):
             "contacts": contacts_data
         }
 
+    except PasswordHashInvalidError:
+        raise HTTPException(status_code=400, detail="Введен неверный пароль 2FA.")
     except (PhoneCodeInvalidError, PhoneCodeExpiredError):
         raise HTTPException(status_code=400, detail="Введен неверный или устаревший код.")
     except Exception as e:
